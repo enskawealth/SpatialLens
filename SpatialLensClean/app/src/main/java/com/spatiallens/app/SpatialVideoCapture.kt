@@ -41,25 +41,43 @@ class SpatialVideoCapture(
                 if (!capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) continue
                 if (chars.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) continue
 
-                val physicalIds = chars.get(CameraCharacteristics.LOGICAL_MULTI_CAMERA_PHYSICAL_IDS) ?: continue
+                // Correct way to get physical IDs
+                val physicalIds = chars.getPhysicalCameraIds() ?: continue
                 if (physicalIds.size < 2) continue
 
-                // Use focal lengths to identify main and ultra-wide
-                val physCams = physicalIds.mapNotNull { pid ->
-                    val physChars = chars.getPhysicalCameraCharacteristics(pid) ?: return@mapNotNull null
-                    val fls = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    if (fls.isNullOrEmpty()) return@mapNotNull null
-                    pid to fls[0]
-                }.sortedBy { it.second }
+                // Identify main and ultra‑wide by focal length
+                var ultraId: String? = null
+                var mainId: String? = null
+                var ultraFocal = Float.MAX_VALUE
+                var mainFocal = 0f
 
-                if (physCams.size < 2) continue
+                for (pid in physicalIds) {
+                    val physChars = chars.getPhysicalCameraCharacteristics(pid) ?: continue
+                    val fls = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS) ?: continue
+                    if (fls.isEmpty()) continue
+                    val focal = fls[0]
 
-                ultraPhysicalId = physCams[0].first
-                mainPhysicalId = physCams[1].first
-                logicalCameraId = camId
+                    if (focal < ultraFocal) {
+                        // The previous ultra becomes main if it exists
+                        if (ultraId != null && (mainId == null || ultraFocal > mainFocal)) {
+                            mainId = ultraId
+                            mainFocal = ultraFocal
+                        }
+                        ultraId = pid
+                        ultraFocal = focal
+                    } else if (focal < mainFocal || mainId == null) {
+                        mainId = pid
+                        mainFocal = focal
+                    }
+                }
 
-                calibration = CalibrationData.estimate(ultraPhysicalId, mainPhysicalId)
-                return true
+                if (ultraId != null && mainId != null) {
+                    ultraPhysicalId = ultraId
+                    mainPhysicalId = mainId
+                    logicalCameraId = camId
+                    calibration = CalibrationData.estimate(ultraPhysicalId, mainPhysicalId)
+                    return true
+                }
             }
             false
         } catch (e: CameraAccessException) {
