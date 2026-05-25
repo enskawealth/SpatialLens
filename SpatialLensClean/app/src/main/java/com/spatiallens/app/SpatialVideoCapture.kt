@@ -21,8 +21,8 @@ class SpatialVideoCapture(
 
     private var cameraDevice: CameraDevice? = null
     private var captureSession: CameraCaptureSession? = null
-    private var backgroundThread: HandlerThread = HandlerThread("CameraThread").apply { start() }
-    private var backgroundHandler: Handler = Handler(backgroundThread.looper)
+    private var backgroundThread = HandlerThread("CameraThread").apply { start() }
+    private var backgroundHandler = Handler(backgroundThread.looper)
     private var executor: Executor = Executors.newSingleThreadExecutor()
 
     var mainPhysicalId: String = ""
@@ -41,25 +41,24 @@ class SpatialVideoCapture(
                 if (!capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) continue
                 if (chars.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) continue
 
-                val physicalIds = chars.physicalCameraIds ?: continue
+                val physicalIds = chars.get(CameraCharacteristics.LOGICAL_MULTI_CAMERA_PHYSICAL_IDS) ?: continue
                 if (physicalIds.size < 2) continue
 
-                val physicalCams = physicalIds.mapNotNull { pid ->
+                // Use focal lengths to identify main and ultra-wide
+                val physCams = physicalIds.mapNotNull { pid ->
                     val physChars = chars.getPhysicalCameraCharacteristics(pid) ?: return@mapNotNull null
-                    val focalLengths = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
-                    if (focalLengths.isNullOrEmpty()) return@mapNotNull null
-                    pid to focalLengths.minOrNull()!!
+                    val fls = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS)
+                    if (fls.isNullOrEmpty()) return@mapNotNull null
+                    pid to fls[0]
                 }.sortedBy { it.second }
 
-                if (physicalCams.size < 2) continue
+                if (physCams.size < 2) continue
 
-                ultraPhysicalId = physicalCams[0].first
-                mainPhysicalId = physicalCams[1].first
+                ultraPhysicalId = physCams[0].first
+                mainPhysicalId = physCams[1].first
                 logicalCameraId = camId
 
-                calibration = CalibrationData.fromCameraCharacteristics(
-                    cameraManager, logicalCameraId, mainPhysicalId, ultraPhysicalId
-                )
+                calibration = CalibrationData.estimate(ultraPhysicalId, mainPhysicalId)
                 return true
             }
             false
@@ -72,57 +71,25 @@ class SpatialVideoCapture(
     fun openCamera() {
         if (logicalCameraId.isEmpty()) throw IllegalStateException("Call findCameras() first")
         try {
-            cameraManager.openCamera(
-                logicalCameraId,
-                executor,
-                object : CameraDevice.StateCallback() {
-                    override fun onOpened(device: CameraDevice) {
-                        cameraDevice = device
-                        createSession()
-                    }
-                    override fun onDisconnected(device: CameraDevice) {
-                        device.close()
-                        cameraDevice = null
-                    }
-                    override fun onError(device: CameraDevice, error: Int) {
-                        device.close()
-                        cameraDevice = null
-                    }
+            cameraManager.openCamera(logicalCameraId, executor, object : CameraDevice.StateCallback() {
+                override fun onOpened(device: CameraDevice) {
+                    cameraDevice = device
+                    createSession()
                 }
-            )
-        } catch (e: SecurityException) {
-            throw RuntimeException("Camera permission not granted", e)
-        } catch (e: CameraAccessException) {
-            throw RuntimeException("Cannot open camera", e)
-        }
+                override fun onDisconnected(device: CameraDevice) { device.close(); cameraDevice = null }
+                override fun onError(device: CameraDevice, error: Int) { device.close(); cameraDevice = null }
+            })
+        } catch (e: SecurityException) { throw RuntimeException("Camera permission not granted", e) }
+          catch (e: CameraAccessException) { throw RuntimeException("Cannot open camera", e) }
     }
 
     private fun createSession() {
         val device = cameraDevice ?: return
-
-        val mainConfig = OutputConfiguration(mainPreviewSurface)
-        mainConfig.setPhysicalCameraId(mainPhysicalId)
-
-        val ultraConfig = OutputConfiguration(ultraPreviewSurface)
-        ultraConfig.setPhysicalCameraId(ultraPhysicalId)
-
+        val mainConfig = OutputConfiguration(mainPreviewSurface).apply { setPhysicalCameraId(mainPhysicalId) }
+        val ultraConfig = OutputConfiguration(ultraPreviewSurface).apply { setPhysicalCameraId(ultraPhysicalId) }
         val configs = listOf(mainConfig, ultraConfig)
 
-        val sessionConfig = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
-            configs,
-            executor,
-            null
-        )
-
-        if (!device.isSessionConfigurationSupported(sessionConfig)) {
-            throw RuntimeException("Dual physical camera streaming not supported on this device")
-        }
-
-        val actualConfig = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
-            configs,
-            executor,
+        val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, configs, executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
@@ -131,69 +98,51 @@ class SpatialVideoCapture(
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     throw RuntimeException("Failed to configure capture session")
                 }
-            }
-        )
+            })
 
-        device.createCaptureSession(actualConfig)
+        if (!device.isSessionConfigurationSupported(sessionConfig))
+            throw RuntimeException("Dual physical camera streaming not supported")
+
+        device.createCaptureSession(sessionConfig)
     }
 
     private fun startPreview() {
         val device = cameraDevice ?: return
         val session = captureSession ?: return
-
         try {
             val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW)
             builder.addTarget(mainPreviewSurface)
             builder.addTarget(ultraPreviewSurface)
             session.setRepeatingRequest(builder.build(), null, backgroundHandler)
-        } catch (e: CameraAccessException) {
-            e.printStackTrace()
-        }
+        } catch (e: CameraAccessException) { e.printStackTrace() }
     }
 
     fun startRecording(outputPath: String) {
         val device = cameraDevice ?: return
         val session = captureSession ?: return
         val cal = calibration ?: throw IllegalStateException("Calibration data not available")
-
         session.close()
 
         val frameSize = Size(1920, 1080)
         framePipeline = CameraFramePipeline(frameSize)
 
         val mainConfig = OutputConfiguration(framePipeline!!.mainImageReader.surface)
-        mainConfig.setPhysicalCameraId(mainPhysicalId)
-
+            .apply { setPhysicalCameraId(mainPhysicalId) }
         val ultraConfig = OutputConfiguration(framePipeline!!.ultraImageReader.surface)
-        ultraConfig.setPhysicalCameraId(ultraPhysicalId)
+            .apply { setPhysicalCameraId(ultraPhysicalId) }
+        val mainPrev = OutputConfiguration(mainPreviewSurface).apply { setPhysicalCameraId(mainPhysicalId) }
+        val ultraPrev = OutputConfiguration(ultraPreviewSurface).apply { setPhysicalCameraId(ultraPhysicalId) }
 
-        val mainPreviewConfig = OutputConfiguration(mainPreviewSurface)
-        mainPreviewConfig.setPhysicalCameraId(mainPhysicalId)
-
-        val ultraPreviewConfig = OutputConfiguration(ultraPreviewSurface)
-        ultraPreviewConfig.setPhysicalCameraId(ultraPhysicalId)
-
-        val allConfigs = listOf(mainConfig, ultraConfig, mainPreviewConfig, ultraPreviewConfig)
-
-        val sessionConfig = SessionConfiguration(
-            SessionConfiguration.SESSION_REGULAR,
-            allConfigs,
-            executor,
+        val allConfigs = listOf(mainConfig, ultraConfig, mainPrev, ultraPrev)
+        val sessionConfig = SessionConfiguration(SessionConfiguration.SESSION_REGULAR, allConfigs, executor,
             object : CameraCaptureSession.StateCallback() {
                 override fun onConfigured(session: CameraCaptureSession) {
                     captureSession = session
-
-                    stereoEncoder = StereoEncoder(
-                        outputPath = outputPath,
-                        perEyeResolution = frameSize,
-                        calibration = cal
-                    )
+                    stereoEncoder = StereoEncoder(outputPath, frameSize, cal)
                     stereoEncoder!!.start()
-
                     framePipeline!!.onFramesAvailable = { mainFrame, ultraFrame ->
                         stereoEncoder!!.processFrames(mainFrame, ultraFrame)
                     }
-
                     try {
                         val builder = device.createCaptureRequest(CameraDevice.TEMPLATE_RECORD)
                         builder.addTarget(framePipeline!!.mainImageReader.surface)
@@ -201,17 +150,12 @@ class SpatialVideoCapture(
                         builder.addTarget(mainPreviewSurface)
                         builder.addTarget(ultraPreviewSurface)
                         session.setRepeatingRequest(builder.build(), null, backgroundHandler)
-                    } catch (e: CameraAccessException) {
-                        e.printStackTrace()
-                    }
+                    } catch (e: CameraAccessException) { e.printStackTrace() }
                 }
-
                 override fun onConfigureFailed(session: CameraCaptureSession) {
                     throw RuntimeException("Failed to configure recording session")
                 }
-            }
-        )
-
+            })
         device.createCaptureSession(sessionConfig)
     }
 
@@ -221,14 +165,8 @@ class SpatialVideoCapture(
         stereoEncoder = null
         framePipeline?.close()
         framePipeline = null
-
         createSession()
     }
 
-    fun release() {
-        stopRecording()
-        captureSession?.close()
-        cameraDevice?.close()
-        backgroundThread.quitSafely()
-    }
+    fun release() { stopRecording(); captureSession?.close(); cameraDevice?.close(); backgroundThread.quitSafely() }
 }
