@@ -34,56 +34,30 @@ class SpatialVideoCapture(
     private var calibration: CalibrationData? = null
 
     fun findCameras(): Boolean {
-        return try {
+        try {
             for (camId in cameraManager.cameraIdList) {
                 val chars = cameraManager.getCameraCharacteristics(camId)
-                val capabilities = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: continue
-                if (!capabilities.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) continue
+                val caps = chars.get(CameraCharacteristics.REQUEST_AVAILABLE_CAPABILITIES) ?: intArrayOf()
+                if (!caps.contains(CameraMetadata.REQUEST_AVAILABLE_CAPABILITIES_LOGICAL_MULTI_CAMERA)) continue
                 if (chars.get(CameraCharacteristics.LENS_FACING) != CameraMetadata.LENS_FACING_BACK) continue
 
-                // Correct way to get physical IDs
-                val physicalIds = chars.getPhysicalCameraIds() ?: continue
+                // Get physical camera IDs (API 28+)
+                val physicalIds: Set<String> = chars.getPhysicalCameraIds()
                 if (physicalIds.size < 2) continue
 
-                // Identify main and ultra‑wide by focal length
-                var ultraId: String? = null
-                var mainId: String? = null
-                var ultraFocal = Float.MAX_VALUE
-                var mainFocal = 0f
+                // Simply take the first two; on Pixel Pro they are ultra-wide and main wide
+                val ids = physicalIds.toList()
+                ultraPhysicalId = ids[0]
+                mainPhysicalId = ids[1]
+                logicalCameraId = camId
 
-                for (pid in physicalIds) {
-                    val physChars = chars.getPhysicalCameraCharacteristics(pid) ?: continue
-                    val fls = physChars.get(CameraCharacteristics.LENS_INFO_AVAILABLE_FOCAL_LENGTHS) ?: continue
-                    if (fls.isEmpty()) continue
-                    val focal = fls[0]
-
-                    if (focal < ultraFocal) {
-                        // The previous ultra becomes main if it exists
-                        if (ultraId != null && (mainId == null || ultraFocal > mainFocal)) {
-                            mainId = ultraId
-                            mainFocal = ultraFocal
-                        }
-                        ultraId = pid
-                        ultraFocal = focal
-                    } else if (focal < mainFocal || mainId == null) {
-                        mainId = pid
-                        mainFocal = focal
-                    }
-                }
-
-                if (ultraId != null && mainId != null) {
-                    ultraPhysicalId = ultraId
-                    mainPhysicalId = mainId
-                    logicalCameraId = camId
-                    calibration = CalibrationData.estimate(ultraPhysicalId, mainPhysicalId)
-                    return true
-                }
+                calibration = CalibrationData.estimate(ultraPhysicalId, mainPhysicalId)
+                return true
             }
-            false
         } catch (e: CameraAccessException) {
             e.printStackTrace()
-            false
         }
+        return false
     }
 
     fun openCamera() {
