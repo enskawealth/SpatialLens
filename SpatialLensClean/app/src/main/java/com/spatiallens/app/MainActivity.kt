@@ -1,3 +1,4 @@
+@'
 package com.spatiallens.app
 
 import android.Manifest
@@ -19,7 +20,6 @@ import java.util.Date
 import java.util.Locale
 
 class MainActivity : AppCompatActivity() {
-
     private lateinit var statusText: TextView
     private lateinit var recordButton: Button
     private lateinit var mainPreview: SurfaceView
@@ -31,56 +31,49 @@ class MainActivity : AppCompatActivity() {
     private var ultraSurface: Surface? = null
     private var surfacesReady = false
 
-    companion object {
-        private const val CAMERA_PERMISSION_REQUEST = 100
-    }
+    companion object { private const val CAMERA_PERMISSION_REQUEST = 100 }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        setContentView(R.layout.activity_main)
+        try {
+            setContentView(R.layout.activity_main)
+            statusText = findViewById(R.id.statusText)
+            recordButton = findViewById(R.id.recordButton)
+            mainPreview = findViewById(R.id.mainPreview)
+            ultraPreview = findViewById(R.id.ultraPreview)
 
-        statusText = findViewById(R.id.statusText)
-        recordButton = findViewById(R.id.recordButton)
-        mainPreview = findViewById(R.id.mainPreview)
-        ultraPreview = findViewById(R.id.ultraPreview)
+            mainPreview.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    mainSurface = holder.surface
+                    checkSurfacesReady()
+                }
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
+                override fun surfaceDestroyed(holder: SurfaceHolder) { mainSurface = null }
+            })
+            ultraPreview.holder.addCallback(object : SurfaceHolder.Callback {
+                override fun surfaceCreated(holder: SurfaceHolder) {
+                    ultraSurface = holder.surface
+                    checkSurfacesReady()
+                }
+                override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
+                override fun surfaceDestroyed(holder: SurfaceHolder) { ultraSurface = null }
+            })
 
-        mainPreview.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                mainSurface = holder.surface
-                checkSurfacesReady()
+            recordButton.setOnClickListener {
+                if (isRecording) stopRecording() else startRecording()
             }
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                mainSurface = null
-            }
-        })
 
-        ultraPreview.holder.addCallback(object : SurfaceHolder.Callback {
-            override fun surfaceCreated(holder: SurfaceHolder) {
-                ultraSurface = holder.surface
-                checkSurfacesReady()
-            }
-            override fun surfaceChanged(holder: SurfaceHolder, format: Int, w: Int, h: Int) {}
-            override fun surfaceDestroyed(holder: SurfaceHolder) {
-                ultraSurface = null
-            }
-        })
-
-        recordButton.setOnClickListener {
-            if (isRecording) {
-                stopRecording()
+            if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
+                ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), CAMERA_PERMISSION_REQUEST)
             } else {
-                startRecording()
+                checkSurfacesReady()
             }
-        }
-
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-            != PackageManager.PERMISSION_GRANTED) {
-            ActivityCompat.requestPermissions(
-                this,
-                arrayOf(Manifest.permission.CAMERA),
-                CAMERA_PERMISSION_REQUEST
-            )
+        } catch (e: Exception) {
+            // Show crash on screen
+            if (::statusText.isInitialized) {
+                statusText.text = "CRASH: ${e.message}\n${e.stackTraceToString().take(500)}"
+            }
+            e.printStackTrace()
         }
     }
 
@@ -92,37 +85,29 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun initializeCamera() {
-        statusText.text = "Finding cameras..."
-        spatialCapture = SpatialVideoCapture(
-            context = this,
-            mainPreviewSurface = mainSurface!!,
-            ultraPreviewSurface = ultraSurface!!
-        )
-
-        val found = spatialCapture!!.findCameras()
-        if (!found) {
-            statusText.text = "ERROR: No supported multi-camera found.\nRequires Pixel Pro device."
-            recordButton.isEnabled = false
-            return
-        }
-
-        statusText.text = "Cameras found. Opening..."
         try {
+            statusText.text = "Finding cameras..."
+            spatialCapture = SpatialVideoCapture(this, mainPreviewSurface = mainSurface!!, ultraPreviewSurface = ultraSurface!!)
+            val found = spatialCapture!!.findCameras()
+            if (!found) {
+                statusText.text = "ERROR: No supported multi-camera found.\nDebug: ${spatialCapture?.debugMessage ?: ""}"
+                recordButton.isEnabled = false
+                return
+            }
+            statusText.text = "Cameras found. Opening..."
             spatialCapture!!.openCamera()
             statusText.text = "Ready to record spatial video"
             recordButton.isEnabled = true
         } catch (e: Exception) {
-            statusText.text = "ERROR: "
+            statusText.text = "CRASH: ${e.message}\n${e.stackTraceToString().take(300)}"
             recordButton.isEnabled = false
         }
     }
 
     private fun startRecording() {
         val timestamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(Date())
-        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES)
-        dir.mkdirs()
-        val outputFile = File(dir, "SpatialVideo_.mp4")
-
+        val dir = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_MOVIES); dir.mkdirs()
+        val outputFile = File(dir, "SpatialVideo_$timestamp.mp4")
         try {
             spatialCapture?.startRecording(outputFile.absolutePath)
             isRecording = true
@@ -130,8 +115,8 @@ class MainActivity : AppCompatActivity() {
             statusText.text = "● RECORDING SPATIAL VIDEO..."
             recordButton.setBackgroundColor(getColor(android.R.color.holo_red_dark))
         } catch (e: Exception) {
-            statusText.text = "ERROR starting: "
-            Toast.makeText(this, "Failed to start: ", Toast.LENGTH_LONG).show()
+            statusText.text = "ERROR starting: ${e.message}"
+            Toast.makeText(this, "Failed to start: ${e.message}", Toast.LENGTH_LONG).show()
         }
     }
 
@@ -141,17 +126,10 @@ class MainActivity : AppCompatActivity() {
         recordButton.text = "START RECORDING"
         statusText.text = "Saving video..."
         recordButton.setBackgroundColor(getColor(android.R.color.holo_blue_dark))
-
-        recordButton.postDelayed({
-            statusText.text = "Ready to record spatial video"
-        }, 2000)
+        recordButton.postDelayed({ statusText.text = "Ready to record spatial video" }, 2000)
     }
 
-    override fun onRequestPermissionsResult(
-        requestCode: Int,
-        permissions: Array<out String>,
-        grantResults: IntArray
-    ) {
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == CAMERA_PERMISSION_REQUEST) {
             if (grantResults.isNotEmpty() && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
@@ -163,8 +141,6 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        spatialCapture?.release()
-    }
+    override fun onDestroy() { super.onDestroy(); spatialCapture?.release() }
 }
+'@ | Out-File -FilePath "$env:USERPROFILE\Desktop\SpatialLensClean\app\src\main\java\com\spatiallens\app\MainActivity.kt" -Encoding UTF8
